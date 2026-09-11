@@ -5,8 +5,46 @@ import { isDomTag } from './dom-tags.js';
 
 const SOURCE_ATTR = DATA_RETICLE_SOURCE_ATTR;
 
+/**
+ * Canonical marker string lives in @reticlehq/server's `init-opt-out.ts`.
+ * If it changes there, change it here too — the two must stay in sync so a user
+ * learns `@reticle-ignore` once, not once per surface.
+ */
+const OPT_OUT_MARKER = '@reticle-ignore';
+
+/**
+ * Matches the marker as a whole token — case-insensitive, with a negative lookahead
+ * so `@reticle-ignored` or `@reticle-ignore-paths` do not count.
+ *
+ * Same semantics as `hasOptOut` in `packages/server/src/init/init-opt-out.ts`.
+ */
+const OPT_OUT_TOKEN = new RegExp(`${OPT_OUT_MARKER}(?![\\w-])`, 'i');
+
 interface PluginApi {
   types: typeof BabelTypes;
+}
+
+interface ReticlePass extends PluginPass {
+  /** Set once per file: true if the source carries the opt-out marker. */
+  reticleIgnoreFile?: boolean;
+}
+
+/**
+ * Check whether the source carries the `@reticle-ignore` marker.
+ * Reads from Babel's in-memory `file.code` (already loaded) — no disk access.
+ *
+ * Matching semantics follow `init-opt-out.ts`: case-insensitive token match
+ * with a `(?![\w-])` boundary, so `@reticle-ignored` does not count.
+ */
+function isReticleIgnoreFile(state: ReticlePass): boolean {
+  if (undefined !== state.reticleIgnoreFile) return state.reticleIgnoreFile;
+  const code = state.file?.code;
+  if ('string' !== typeof code || 0 === code.length) {
+    state.reticleIgnoreFile = false;
+    return false;
+  }
+  state.reticleIgnoreFile = OPT_OUT_TOKEN.test(code);
+  return state.reticleIgnoreFile;
 }
 
 /**
@@ -14,17 +52,26 @@ interface PluginApi {
  * tag). @reticlehq/react reads it to map a DOM node back to its source — needed on React 19,
  * which removed `_debugSource`. Intended for dev builds only.
  *
+ * Skips files that carry the `@reticle-ignore` marker — a per-file opt-out for
+ * generated files, snapshot-tested components, or any local reason the stamp would be wrong.
+ *
  * Exported with `export =` (CommonJS module.exports) — Babel loads a plugin via `require()` and takes
  * the module object directly, so this ships as a bare `module.exports = fn` with no `__esModule`/`default`
  * interop wrapper (which some bundlers mishandle) and no named exports (which an ESM consumer's static
  * named import cannot see at runtime in a CJS module). The attribute name itself is exported from
  * `@reticlehq/core` as `DATA_RETICLE_SOURCE_ATTR` for anyone who needs it.
  */
-function reticleSourcePlugin({ types: t }: PluginApi): PluginObj<PluginPass> {
+function reticleSourcePlugin({ types: t }: PluginApi): PluginObj<ReticlePass> {
   return {
     name: 'reticle-source',
     visitor: {
-      JSXOpeningElement(path, state: PluginPass) {
+      Program(_path, state) {
+        // Peek at the source eagerly so the decision is cached before any JSX visit.
+        isReticleIgnoreFile(state);
+      },
+      JSXOpeningElement(path, state: ReticlePass) {
+        if (true === state.reticleIgnoreFile) return;
+
         const node = path.node;
         // Host elements only (e.g. <div>, <button>) — skip components (<App />).
         if (node.name.type !== 'JSXIdentifier') return;
@@ -36,6 +83,7 @@ function reticleSourcePlugin({ types: t }: PluginApi): PluginObj<PluginPass> {
         // nodes. R3F reads a dashed prop as a pierced property path and throws from the commit
         // phase, which unmounts the entire app to a white screen. See dom-tags.ts.
         if (!isDomTag(tag)) return;
+
 
         const alreadyStamped = node.attributes.some(
           (attr) =>

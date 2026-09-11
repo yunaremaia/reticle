@@ -40,6 +40,27 @@ import { DATA_RETICLE_SOURCE_ATTR } from '@reticlehq/core';
 /** Files this module stamps. `.svelte.ts` (a runes module) is code, not markup — excluded. */
 export const SVELTE_FILE = /\.svelte$/;
 
+/**
+ * Canonical marker string lives in @reticlehq/server's `init-opt-out.ts`.
+ * If it changes there, change it here too — the two must stay in sync so a user
+ * learns `@reticle-ignore` once, not once per surface.
+ */
+const OPT_OUT_MARKER = '@reticle-ignore';
+
+/**
+ * Matches the marker as a whole token — case-insensitive, with a negative lookahead
+ * so `@reticle-ignored` or `@reticle-ignore-paths` do not count.
+ *
+ * Same semantics as `hasOptOut` in `packages/server/src/init/init-opt-out.ts`.
+ */
+const OPT_OUT_TOKEN = new RegExp(`${OPT_OUT_MARKER}(?![\\w-])`, 'i');
+
+/** True when `source` carries the opt-out marker. Absent or empty source is not an opt-out. */
+function hasOptOut(source: string | undefined): boolean {
+  if ('string' !== typeof source || 0 === source.length) return false;
+  return OPT_OUT_TOKEN.test(source);
+}
+
 /** Element node types that are a real place in the DOM, in Svelte 5's AST and Svelte 4's. */
 const HOST_ELEMENT_TYPES: ReadonlySet<string> = new Set(['RegularElement', 'Element']);
 
@@ -115,7 +136,7 @@ interface ElementNode {
 }
 
 function isElementNode(value: unknown): value is ElementNode {
-  if (null === value || typeof value !== 'object') return false;
+  if (null === value || 'object' !== typeof value) return false;
   const node = value as Partial<ElementNode>;
   return (
     'string' === typeof node.type &&
@@ -128,7 +149,7 @@ function isElementNode(value: unknown): value is ElementNode {
 function isAlreadyStamped(node: ElementNode): boolean {
   return (node.attributes ?? []).some(
     (attr) =>
-      attr !== null &&
+      null !== attr &&
       'object' === typeof attr &&
       (attr as { name?: unknown }).name === DATA_RETICLE_SOURCE_ATTR,
   );
@@ -147,7 +168,7 @@ function collectElements(root: unknown): ElementNode[] {
   const found: ElementNode[] = [];
   const seen = new Set<object>();
   const visit = (value: unknown): void => {
-    if (null === value || typeof value !== 'object' || seen.has(value)) return;
+    if (null === value || 'object' !== typeof value || seen.has(value)) return;
     seen.add(value);
     if (Array.isArray(value)) {
       for (const item of value) visit(item);
@@ -165,16 +186,17 @@ function collectElements(root: unknown): ElementNode[] {
 /**
  * Stamp `data-reticle-source="file:line:column"` on every host element of a `.svelte` component.
  *
- * Returns null — never throws — when the compiler is absent or the component does not parse. In dev
- * the transform runs on every keystroke, so a half-typed component is the NORMAL case; failing the
- * build over one would make Reticle the reason the dev server is red, for a feature that is pure
- * enrichment on top of an app that otherwise works.
+ * Returns null — never throws — when the compiler is absent, the component does not parse, or the
+ * source carries the `@reticle-ignore` marker. In dev the transform runs on every keystroke, so a
+ * half-typed component is the NORMAL case; failing the build over one would make Reticle the reason
+ * the dev server is red, for a feature that is pure enrichment on top of an app that otherwise works.
  */
 export function stampSvelte(
   code: string,
   id: string,
   load: LoadSvelteCompiler = defaultLoadCompiler,
 ): string | null {
+  if (hasOptOut(code)) return null;
   const compiler = load();
   if (null === compiler) return null;
   let ast: unknown;

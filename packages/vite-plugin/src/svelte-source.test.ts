@@ -143,3 +143,50 @@ describe('the compiler is reached only for a .svelte file', () => {
     expect(loader).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('@reticle-ignore', () => {
+  // Matching semantics follow `packages/server/src/init/init-opt-out.ts`: case-insensitive token
+  // match with a `(?![\w-])` boundary, so `@reticle-ignored` does not count.
+
+  it('returns null (skips stamping) when the file starts with `// @reticle-ignore`', () => {
+    const out = stampSvelte('// @reticle-ignore\n<div>hi</div>', 'src/App.svelte');
+    expect(out).toBeNull();
+  });
+
+  it('returns null even with leading whitespace before the comment', () => {
+    const out = stampSvelte('   // @reticle-ignore\n<div>hi</div>', 'src/App.svelte');
+    expect(out).toBeNull();
+  });
+
+  it('still stamps when the comment does NOT carry the marker', () => {
+    const out = stampSvelte('<script>let n = 1;</script>\n// some other comment\n<div>hi</div>', 'src/App.svelte');
+    expect(out).not.toBeNull();
+    expect(stampedValues(out ?? '')).toEqual(['src/App.svelte:3:0']);
+  });
+
+  it('does not ask for the compiler when the file is ignored', () => {
+    const loader = vi.fn(() => null);
+    stampSvelte('// @reticle-ignore\n<div>hi</div>', 'src/App.svelte', loader);
+    expect(loader).not.toHaveBeenCalled();
+  });
+
+  it('matches case-insensitively (a marker people type by hand gets typed how they like)', () => {
+    const out = stampSvelte('// @Reticle-Ignore\n<div>hi</div>', 'src/App.svelte');
+    expect(out).toBeNull();
+  });
+
+  it('does NOT fire on `@reticle-ignored` (boundary lookahead)', () => {
+    const out = stampSvelte('// see docs on @reticle-ignored-paths\n<div>hi</div>', 'src/App.svelte');
+    expect(out).not.toBeNull();
+  });
+
+  it('fires on block comment /* @reticle-ignore */', () => {
+    const out = stampSvelte('/* @reticle-ignore */\n<div>hi</div>', 'src/App.svelte');
+    expect(out).toBeNull();
+  });
+
+  it('fires when marker appears mid-file (token match, not first-line-only)', () => {
+    const out = stampSvelte('<div>hi</div>\n// @reticle-ignore', 'src/App.svelte');
+    expect(out).toBeNull();
+  });
+});
